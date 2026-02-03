@@ -17,12 +17,11 @@ extern mode_handler_t* g_ysf;
 extern mode_handler_t* g_nxdn;
 extern modem_t* g_modem;
 
-// Called periodically
-void tx_tick() {
-  uint64_t now = now_ms();
-  if (rc_is_dmr_tx_on(&g_rc) && rc_dmr_tx_watchdog_expired(&g_rc, (uint32_t)now)) {
-    // Stop DMR TX
-    modem_dmr_start(g_modem, 0);          // boolean OFF (0x00)
+// Stop TX when watchdog expires
+static inline void tx_tick() {
+  uint32_t now32 = (uint32_t)now_ms();
+  if (rc_is_dmr_tx_on(&g_rc) && rc_dmr_tx_watchdog_expired(&g_rc, now32)) {
+    modem_dmr_start(g_modem, 0);      // turn TX OFF (0x00)
     rc_set_dmr_tx_on(&g_rc, 0U);
   }
 }
@@ -35,6 +34,9 @@ void* tx_thread_fn(void* arg) {
   for (;;) {
     uint32_t n = (uint32_t)now_ms();
 
+    // Always check watchdog first
+    tx_tick();
+
     unsigned rx_active_dmr  = atomic_load_explicit(&g_rc.rx_active_dmr,  memory_order_acquire);
     unsigned rx_active_ysf  = atomic_load_explicit(&g_rc.rx_active_ysf,  memory_order_acquire);
     unsigned rx_active_nxdn = atomic_load_explicit(&g_rc.rx_active_nxdn, memory_order_acquire);
@@ -46,6 +48,8 @@ void* tx_thread_fn(void* arg) {
         uint8_t type = (g_dmr->last_type == MMDVM_DMR_DATA2) ? MMDVM_DMR_DATA2 : MMDVM_DMR_DATA1;
         modem_write_envelope(g_modem, type, out, out_len);
         rc_on_tx_dmr(&g_rc, n);
+        // Bump watchdog ONLY on actual TX, so TX mode can turn off if no frames are sent
+        rc_bump_dmr_tx_watchdog(&g_rc, n, g_dmr ? g_dmr->hang_ms : 3000);
       }
     }
 

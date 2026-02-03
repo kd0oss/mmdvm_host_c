@@ -5,10 +5,10 @@
 #include <stdlib.h>
 #include "time_util.h"
 #include "dmr_meta.h"
-#include "mmdvm_proto.h"
+#include "mmdvm_proto.h"  // declares MMDVM_DMR_START
 #include <stdio.h>
 #include "dmr_defines.h"
-#include "dmr_csbk_port.h"
+#include "dmr_csbk_port.h"  // declares csbk_is_bsdwnact_strict
 #include "log.h"
 
 extern repeater_ctrl_t g_rc;
@@ -19,26 +19,19 @@ extern modem_t* g_modem;
 
 extern int modem_write_envelope(modem_t* m, uint8_t type, const uint8_t* payload, size_t len);
 
-// Minimal helper: detect DMR voice header frame (heuristic)
+// Minimal helper: detect DMR voice/data header (heuristic)
 static int is_dmr_voice_header(const uint8_t* payload, size_t len) {
   if (!payload || len < 33) return 0;
-  // Heuristic: first control byte indicates voice/data but not idle
   const uint8_t ct = payload[0];
   const uint8_t CONTROL_VOICE = 0x20;
   const uint8_t CONTROL_DATA  = 0x40;
   const uint8_t CONTROL_IDLE  = 0x80;
-  if ((ct & (CONTROL_VOICE | CONTROL_DATA)) && !(ct & CONTROL_IDLE)) {
-    // Additional header pattern checks could be added here if needed
-    return 1;
-  }
-  return 0;
+  return ((ct & (CONTROL_VOICE | CONTROL_DATA)) && !(ct & CONTROL_IDLE)) ? 1 : 0;
 }
 
 // Build a basic ShortLC payload from an incoming header (placeholder mapping)
 static int build_shortlc_from_header(const uint8_t* header33, uint8_t out9[9]) {
   if (!header33) return -1;
-  // Placeholder: extract 9 bytes from positions commonly used by MMDVMHost SLC synthesis.
-  // For full fidelity, wire actual field extraction per MMDVMHost logic.
   for (int i = 0; i < 9; ++i) out9[i] = header33[2 + i]; // shift past control/type
   return 0;
 }
@@ -54,10 +47,10 @@ void* rx_thread_fn(void* arg) {
   for (;;) {
     int r = modem_read_frame(g_modem, &f);
     if (r == 0) {
-      uint64_t now = now_ms();
+      uint64_t now64 = now_ms();
       switch (f.mode) {
         case MODE_DMR:
-          if (rc_repeat_allowed_dmr(&g_rc, now)) {
+          if (rc_repeat_allowed_dmr(&g_rc, now64)) {
             g_dmr->last_type = f.type;
             if (f.len >= 34) {
               uint8_t meta0 = f.data[0];
@@ -71,16 +64,16 @@ void* rx_thread_fn(void* arg) {
                 log_info("CSBK strict: %s, srcId=%u", strict_ok ? "PASS" : "FAIL", strict_ok ? srcId : 0U);
 
                 if (strict_ok)  {
-                  // Mirror MMDVMHost: set mode, start TX, quick status poll
+                  // Set DMR mode, poll status, start TX, and set initial watchdog
                   if (modem_set_mode(g_modem, MODE_DMR) != 0) log_info("SET_MODE DMR failed");
-                  modem_get_status(g_modem); // immediate poll
+                  modem_get_status(g_modem);
                   modem_dmr_start(g_modem, 1);
                   rc_set_dmr_tx_on(&g_rc, 1U);
-                  rc_bump_dmr_tx_watchdog(&g_rc, (uint32_t)now, 3000);
+                  rc_bump_dmr_tx_watchdog(&g_rc, (uint32_t)now64, g_dmr ? g_dmr->hang_ms : 3000);
                 }
               }
 
-              // Upon seeing a voice/data header, send ABORT (slot 1) and ShortLC like MMDVMHost
+              // Voice/data header: send ABORT and ShortLC (mirrors MMDVMHost behavior)
               if (is_dmr_voice_header(f.data, f.len)) {
                 modem_dmr_abort(g_modem, 1);
                 uint8_t slc9[9];
@@ -90,17 +83,17 @@ void* rx_thread_fn(void* arg) {
               }
             }
 
-            // Echo path
+            // Echo path input processing
             mode_on_rx(g_dmr,  f.data, f.len, f.ts_ms);
             rc_on_rx_dmr(&g_rc);
-            if (rc_is_dmr_tx_on(&g_rc)) {
-              rc_bump_dmr_tx_watchdog(&g_rc, (uint32_t)now, 3000);
-            }
+
+            // IMPORTANT: do NOT bump TX watchdog here; it should expire after last TX.
+            // If we keep bumping here, TX mode never turns off.
           }
           break;
 
         case MODE_YSF:
-          if (rc_repeat_allowed_ysf(&g_rc, now)) {
+          if (rc_repeat_allowed_ysf(&g_rc, now64)) {
             g_ysf->last_type = f.type;
             mode_on_rx(g_ysf,  f.data, f.len, f.ts_ms);
             rc_on_rx_ysf(&g_rc);
@@ -108,7 +101,7 @@ void* rx_thread_fn(void* arg) {
           break;
 
         case MODE_NXDN:
-          if (rc_repeat_allowed_nxdn(&g_rc, now)) {
+          if (rc_repeat_allowed_nxdn(&g_rc, now64)) {
             g_nxdn->last_type = f.type;
             mode_on_rx(g_nxdn, f.data, f.len, f.ts_ms);
             rc_on_rx_nxdn(&g_rc);
