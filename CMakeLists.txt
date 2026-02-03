@@ -5,12 +5,10 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
 add_compile_options(-Wall -Wextra -Werror=return-type)
-
 include_directories(${CMAKE_SOURCE_DIR}/include)
 
 add_library(core_c
   src/modem_posix.c
-  src/ringbuf.c
   src/repeater_control.c
   src/thread_setup.c
   src/rx_thread.c
@@ -19,9 +17,9 @@ add_library(core_c
   src/mode_ysf.c
   src/mode_nxdn.c
   src/set_config.c
-  src/log.c               # NEW
-  src/time_util.c            # NEW
-  src/dmr_csbk.c
+  src/log.c
+  src/time_util.c
+  src/status_thread.c
 )
 
 add_library(adapters_cpp
@@ -36,7 +34,6 @@ add_library(adapters_cpp
 
 target_include_directories(adapters_cpp PRIVATE ${CMAKE_SOURCE_DIR}/third_party/mmdvmhost)
 
-# Enable GNU extensions (CPU_ZERO/CPU_SET) for this target
 target_compile_definitions(core_c PRIVATE _GNU_SOURCE _POSIX_C_SOURCE=200809L)
 target_link_libraries(core_c PUBLIC pthread rt)
 

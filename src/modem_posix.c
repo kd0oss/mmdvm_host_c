@@ -1,6 +1,7 @@
 #include "modem.h"
 #include "mmdvm_proto.h"
 #include "log.h"
+#include "time_util.h"
 #include <termios.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -9,7 +10,6 @@
 #include <stdlib.h>
 #include <time.h>
 #include <stdio.h>
-#include "modes.h"
 
 struct modem { int fd; int baud; };
 
@@ -46,8 +46,6 @@ static int set_interface_attribs(int fd, int speed) {
   tty.c_cc[VMIN] = 0; tty.c_cc[VTIME] = 1;
   return tcsetattr(fd, TCSANOW, &tty);
 }
-
-static uint64_t now_ms(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000ULL + ts.tv_nsec / 1000000ULL; }
 
 modem_t* modem_open(const char* dev, int baud) {
   int fd = open(dev, O_RDWR | O_NOCTTY | O_NONBLOCK);
@@ -91,7 +89,7 @@ int modem_read_frame(modem_t* m, modem_frame_t* out) {
   if (pay_len && (!payload || read_n(m->fd, payload, pay_len, 20) != (ssize_t)pay_len)) { free(payload); return -1; }
 
   out->ts_ms = now_ms();
-  out->type  = type; // NEW: expose the raw TYPE
+  out->type  = type;
 
   switch (type) {
     case MMDVM_DMR_DATA1:
@@ -105,19 +103,8 @@ int modem_read_frame(modem_t* m, modem_frame_t* out) {
   }
   out->data = payload; out->len = pay_len;
 
-  switch (type) {
-    case MMDVM_DMR_DATA1:
-    case MMDVM_DMR_DATA2:
-    case MMDVM_YSF_DATA:
-    case MMDVM_NXDN_DATA:
-      log_frame_rx(type, payload, pay_len);
-      break;
-    default:
-      // You may also log control frames if desired:
-      log_frame_rx(type, payload, pay_len);
-      break;
-  }
-
+  // Log by envelope type; data/control frames both logged
+  log_frame_rx(type, payload, pay_len);
   return 0;
 }
 
@@ -136,7 +123,6 @@ static ssize_t write_n(int fd, const uint8_t* buf, size_t n) {
 int modem_write_envelope(modem_t* m, uint8_t type, const uint8_t* payload, size_t len) {
   if (!m) return -1;
   uint8_t header[3] = { MMDVM_SOF, (uint8_t)(3 + (payload ? len : 0)), type };
-  // Log TX before writing to avoid partial output in case of EAGAIN
   log_frame_tx(type, payload ? payload : (const uint8_t*)"", payload ? len : 0);
 
   if (write_n(m->fd, header, sizeof(header)) != (ssize_t)sizeof(header)) return -1;
@@ -157,9 +143,23 @@ int modem_write_frame(modem_t* m, radio_mode_t mode, const uint8_t* data, size_t
 }
 
 int modem_get_version(modem_t* m) { return modem_write_envelope(m, MMDVM_GET_VERSION, NULL, 0); }
+int modem_get_status(modem_t* m)  { return modem_write_envelope(m, MMDVM_GET_STATUS, NULL, 0); }
+
+// Map internal radio_mode_t to MMDVM SET_MODE protocol codes.
+static uint8_t mmdvm_mode_code(uint8_t internal_mode) {
+  switch (internal_mode) {
+    case MODE_DMR:  return MMDVM_MODE_DMR;
+    case MODE_YSF:  return MMDVM_MODE_YSF;
+    case MODE_NXDN: return MMDVM_MODE_NXDN;
+    default:        return MMDVM_MODE_IDLE;
+  }
+}
+
 int modem_set_mode(modem_t* m, uint8_t state)
 {
-  uint8_t p[1] = { state };
+  if (!m) return -1;
+  uint8_t code = mmdvm_mode_code(state);
+  uint8_t p[1] = { code };
   return modem_write_envelope(m, MMDVM_SET_MODE, p, 1);
 }
 

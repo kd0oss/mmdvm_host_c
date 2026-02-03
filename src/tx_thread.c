@@ -17,12 +17,10 @@ extern mode_handler_t* g_ysf;
 extern mode_handler_t* g_nxdn;
 extern modem_t* g_modem;
 
-// ...now_ms()...
-
 // Called periodically
 void tx_tick() {
-  uint64_t now = now_ms32();
-  if (rc_is_dmr_tx_on(&g_rc) && rc_dmr_tx_watchdog_expired(&g_rc, now)) {
+  uint64_t now = now_ms();
+  if (rc_is_dmr_tx_on(&g_rc) && rc_dmr_tx_watchdog_expired(&g_rc, (uint32_t)now)) {
     // Stop DMR TX
     modem_dmr_start(g_modem, 0);          // boolean OFF (0x00)
     rc_set_dmr_tx_on(&g_rc, 0U);
@@ -35,7 +33,7 @@ void* tx_thread_fn(void* arg) {
   size_t out_len;
 
   for (;;) {
-    uint32_t n = now_ms32();
+    uint32_t n = (uint32_t)now_ms();
 
     unsigned rx_active_dmr  = atomic_load_explicit(&g_rc.rx_active_dmr,  memory_order_acquire);
     unsigned rx_active_ysf  = atomic_load_explicit(&g_rc.rx_active_ysf,  memory_order_acquire);

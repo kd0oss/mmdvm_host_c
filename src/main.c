@@ -9,11 +9,18 @@
 #include "repeater_control.h"
 #include "set_config.h"
 #include "log.h"
+#include "time_util.h"
 
 // Mode constructors
 mode_handler_t* dmr_mode_new(void* ctx);
 mode_handler_t* ysf_mode_new(void* ctx);
 mode_handler_t* nxdn_mode_new(void* ctx);
+
+extern void* rx_thread_fn(void* arg);
+extern void* tx_thread_fn(void* arg);
+extern void* status_thread_fn(void* arg);
+extern void rc_tick(repeater_ctrl_t* rc, mode_handler_t* dmr, mode_handler_t* ysf, mode_handler_t* nxdn);
+extern void set_rt(pthread_t thr, int prio, int cpu);
 
 // Globals
 modem_t* g_modem = NULL;
@@ -21,12 +28,7 @@ mode_handler_t* g_dmr = NULL;
 mode_handler_t* g_ysf = NULL;
 mode_handler_t* g_nxdn = NULL;
 repeater_ctrl_t g_rc = {0};
-config_t* g_cfg = NULL; // NEW
-
-extern void* rx_thread_fn(void* arg);
-extern void* tx_thread_fn(void* arg);
-extern void rc_tick(repeater_ctrl_t* rc, mode_handler_t* dmr, mode_handler_t* ysf, mode_handler_t* nxdn);
-extern void set_rt(pthread_t thr, int prio, int cpu);
+config_t* g_cfg = NULL;
 
 typedef struct {
   modem_t* modem;
@@ -35,8 +37,6 @@ typedef struct {
   mode_handler_t* ysf;
   mode_handler_t* nxdn;
 } app_ctx_t;
-
-static uint64_t now_ms(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000ULL + ts.tv_nsec / 1000000ULL; }
 
 int main(int argc, char** argv) {
   const char* cfg_path = (argc > 1) ? argv[1] : "config.ini";
@@ -47,7 +47,7 @@ int main(int argc, char** argv) {
   if (!g_modem) { fprintf(stderr, "Failed to open modem on %s\n", cfg->serial_dev ? cfg->serial_dev : "(null)"); config_free(cfg); return 1; }
 
   g_rc.mode = cfg->duplex;
-  g_rc.tx_lockout_ms = 250; // suppress echo of RX within 250ms of our own TX per mode
+  g_rc.tx_lockout_ms = 250;
 
   modem_get_version(g_modem);
   apply_modem_config(g_modem, cfg);
@@ -56,30 +56,30 @@ int main(int argc, char** argv) {
   g_dmr = app.dmr = dmr_mode_new(&app);
   g_ysf = app.ysf = ysf_mode_new(&app);
   g_nxdn = app.nxdn = nxdn_mode_new(&app);
-  g_cfg = cfg; // make available to threads
+  g_cfg = cfg;
 
-  app.dmr->ops->init(app.dmr);
-  app.ysf->ops->init(app.ysf);
-  app.nxdn->ops->init(app.nxdn);
+  g_dmr->ops->init(g_dmr);
+  g_ysf->ops->init(g_ysf);
+  g_nxdn->ops->init(g_nxdn);
 
-  app.dmr->hang_ms = cfg->dmr_hang_ms;
-  app.ysf->hang_ms = cfg->ysf_hang_ms;
-  app.nxdn->hang_ms = cfg->nxdn_hang_ms;
+  g_dmr->hang_ms = cfg->dmr_hang_ms;
+  g_ysf->hang_ms = cfg->ysf_hang_ms;
+  g_nxdn->hang_ms = cfg->nxdn_hang_ms;
 
-  // Apply logging config
   log_set_rx_enabled(cfg->log_frames_rx);
   log_set_tx_enabled(cfg->log_frames_tx);
 
   g_rc.tx_lockout_ms = 150;
   rc_set_dmr_tx_on(&g_rc, 0);
-  atomic_store_explicit(&g_rc.dmr_tx_watchdog_ms, 0U, memory_order_relaxed);
 
-  pthread_t rx_thr, tx_thr;
+  pthread_t rx_thr, tx_thr, st_thr;
   pthread_create(&rx_thr, NULL, rx_thread_fn, NULL);
   pthread_create(&tx_thr, NULL, tx_thread_fn, NULL);
+  pthread_create(&st_thr, NULL, status_thread_fn, g_modem);
 
   set_rt(rx_thr, 40, 1);
   set_rt(tx_thr, 20, 2);
+  set_rt(st_thr, 10, 0);
 
   for (;;) {
     rc_tick(&g_rc, g_dmr, g_ysf, g_nxdn);
@@ -89,6 +89,7 @@ int main(int argc, char** argv) {
 
   pthread_join(rx_thr, NULL);
   pthread_join(tx_thr, NULL);
+  pthread_join(st_thr, NULL);
   modem_close(g_modem);
   config_free(cfg);
   return 0;
