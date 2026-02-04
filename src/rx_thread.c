@@ -1,5 +1,6 @@
 #include "modem.h"
 #include "mode.h"
+#include <stdint.h>
 #include <time.h>
 #include "repeater_control.h"
 #include <stdlib.h>
@@ -9,6 +10,8 @@
 #include <stdio.h>
 #include "dmr_defines.h"
 #include "dmr_csbk_port.h"  // declares csbk_is_bsdwnact_strict
+#include "dmr_lc_port.h"    // NEW: CDMRLC-based src/dst parsing
+#include "dmr_slotType_port.h"    // NEW: CDMRSlotType-based color_code/data_type parsing
 #include "log.h"
 
 extern repeater_ctrl_t g_rc;
@@ -19,17 +22,23 @@ extern modem_t* g_modem;
 
 extern int modem_write_envelope(modem_t* m, uint8_t type, const uint8_t* payload, size_t len);
 
-// Minimal helper: detect DMR voice/data header (heuristic)
-static int is_dmr_voice_header(const uint8_t* payload, size_t len) {
-  if (!payload || len < 33) return 0;
-  const uint8_t ct = payload[0];
+uint8_t color_code = 0;
+uint8_t slot = 0;
+uint32_t src_id = 0;
+uint32_t dst_id = 0;
+int is_group = 1;
+
+// Detect DMR voice/data header (first byte of 33-byte header block is control/type)
+static int is_dmr_voice_or_data(const uint8_t* header33, size_t len) {
+  if (!header33 || len < 33) return 0;
+  const uint8_t ct = header33[0];
   const uint8_t CONTROL_VOICE = 0x20;
   const uint8_t CONTROL_DATA  = 0x40;
   const uint8_t CONTROL_IDLE  = 0x80;
-  return ((ct & (CONTROL_VOICE | CONTROL_DATA)) && !(ct & CONTROL_IDLE)) ? 1 : 0;
+  return ((ct & (CONTROL_DATA)) && !(ct & CONTROL_IDLE)) ? 1 : 0;
 }
 
-// Build a basic ShortLC payload from an incoming header (placeholder mapping)
+// Naive ShortLC builder (placeholder mapping)
 static int build_shortlc_from_header(const uint8_t* header33, uint8_t out9[9]) {
   if (!header33) return -1;
   for (int i = 0; i < 9; ++i) out9[i] = header33[2 + i]; // shift past control/type
@@ -53,9 +62,8 @@ void* rx_thread_fn(void* arg) {
           if (rc_repeat_allowed_dmr(&g_rc, now64)) {
             g_dmr->last_type = f.type;
             if (f.len >= 34) {
-              uint8_t meta0 = f.data[0];
-              uint8_t meta1 = f.data[1];
-              log_info("[RX] DMR meta tag=0x%02X meta=0x%02X", meta0, meta1);
+              const uint8_t meta0 = f.data[0];
+              const uint8_t meta1 = f.data[1];
 
               // CSBK wake-up detection (idle + data sync + CSBK)
               if (meta0 == (DMR_IDLE_RX | DMR_SYNC_DATA | DT_CSBK)) {
@@ -64,7 +72,6 @@ void* rx_thread_fn(void* arg) {
                 log_info("CSBK strict: %s, srcId=%u", strict_ok ? "PASS" : "FAIL", strict_ok ? srcId : 0U);
 
                 if (strict_ok)  {
-                  // Set DMR mode, poll status, start TX, and set initial watchdog
                   if (modem_set_mode(g_modem, MODE_DMR) != 0) log_info("SET_MODE DMR failed");
                   modem_get_status(g_modem);
                   modem_dmr_start(g_modem, 1);
@@ -73,13 +80,32 @@ void* rx_thread_fn(void* arg) {
                 }
               }
 
-              // Voice/data header: send ABORT and ShortLC (mirrors MMDVMHost behavior)
-              if (is_dmr_voice_header(f.data, f.len)) {
+              // 33-byte RF header starts after the two meta bytes
+              const uint8_t* header33 = (f.data + 1);
+              const size_t   header_len = (f.len - 1);
+
+              // Decode LC IDs with CDMRLC
+              if (is_dmr_voice_or_data(f.data, f.len)) {
+                if (dmr_lc_parse_ids(header33, header_len, &src_id, &dst_id, &is_group)) {
+
+                  dmr_get_color_code(header33, header_len, &color_code);
+                  dmr_get_data_type(header33, header_len, &slot);
+
+                  log_info("[RX] DMR LC: src=%u dst=%u %s | cc=%u slot=%u",
+                           src_id, dst_id, is_group ? "(group)" : "(private)", color_code, slot);
+                } else {
+             //     log_info("[RX] DMR LC: parse FAILED | cc=%u slot=%u", color_code, slot);
+                }
+
+                // Mirror MMDVMHost: ABORT then ShortLC (placeholder mapping)
                 modem_dmr_abort(g_modem, 1);
                 uint8_t slc9[9];
-                if (build_shortlc_from_header(f.data, slc9) == 0) {
+                if (build_shortlc_from_header(header33, slc9) == 0) {
                   modem_dmr_shortlc(g_modem, slc9);
                 }
+              } else {
+                // Non-voice/data frames: still show meta with cc/slot
+            //    log_info("[RX] DMR meta tag=0x%02X meta=0x%02X (cc=%u, slot=%u)", meta0, meta1, color_code, slot);
               }
             }
 
@@ -88,7 +114,6 @@ void* rx_thread_fn(void* arg) {
             rc_on_rx_dmr(&g_rc);
 
             // IMPORTANT: do NOT bump TX watchdog here; it should expire after last TX.
-            // If we keep bumping here, TX mode never turns off.
           }
           break;
 

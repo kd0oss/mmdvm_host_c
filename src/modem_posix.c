@@ -97,7 +97,7 @@ int modem_read_frame(modem_t* m, modem_frame_t* out) {
     case MMDVM_YSF_DATA:  out->mode = MODE_YSF; break;
     case MMDVM_NXDN_DATA: out->mode = MODE_NXDN; break;
     default:
-         log_frame_rx(type, payload, pay_len);
+    //     log_frame_rx(type, payload, pay_len);
          free(payload);
          return 1;
   }
@@ -123,7 +123,8 @@ static ssize_t write_n(int fd, const uint8_t* buf, size_t n) {
 int modem_write_envelope(modem_t* m, uint8_t type, const uint8_t* payload, size_t len) {
   if (!m) return -1;
   uint8_t header[3] = { MMDVM_SOF, (uint8_t)(3 + (payload ? len : 0)), type };
-  log_frame_tx(type, payload ? payload : (const uint8_t*)"", payload ? len : 0);
+  if (type != MMDVM_GET_STATUS)
+    log_frame_tx(type, payload ? payload : (const uint8_t*)"", payload ? len : 0);
 
   if (write_n(m->fd, header, sizeof(header)) != (ssize_t)sizeof(header)) return -1;
   if (payload && len) {
