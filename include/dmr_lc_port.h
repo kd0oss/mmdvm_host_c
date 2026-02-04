@@ -6,13 +6,9 @@
 extern "C" {
 #endif
 
-// Parse a 33-byte DMR RF voice header (the block after the two metadata bytes).
-// Returns 1 on success and fills out_src_id/out_dst_id.
-// Optionally sets out_is_group (1 group call, 0 private) if non-NULL.
-// This adapter uses MMDVMHost's CDMRLC internally and ONLY returns IDs.
-int dmr_lc_parse_ids(const uint8_t* header33, size_t len,
-                     uint32_t* out_src_id, uint32_t* out_dst_id,
-                     int* out_is_group);
+// Decode IDs from LC header at 'header33' for the given data type (DT_VOICE_LC_HEADER or DT_DATA_HEADER).
+int dmr_lc_parse_ids_dt(const uint8_t* header33, size_t len, uint8_t dt,
+                        uint32_t* out_src_id, uint32_t* out_dst_id, int* out_is_group);
 
 #ifdef __cplusplus
 }
