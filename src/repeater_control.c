@@ -10,32 +10,32 @@ void rc_on_rx_nxdn(repeater_ctrl_t* rc){ atomic_store_explicit(&rc->rx_active_nx
 
 // record TX events
 void rc_on_tx_dmr(repeater_ctrl_t* rc, uint64_t now) {
-  atomic_store_explicit(&rc->last_tx_ms_dmr, (uint32_t)now, memory_order_release);
+  atomic_store_explicit(&rc->last_tx_ms_dmr, (uint64_t)now, memory_order_release);
 }
 void rc_on_tx_ysf(repeater_ctrl_t* rc, uint64_t now) {
-  atomic_store_explicit(&rc->last_tx_ms_ysf, (uint32_t)now, memory_order_release);
+  atomic_store_explicit(&rc->last_tx_ms_ysf, (uint64_t)now, memory_order_release);
 }
 void rc_on_tx_nxdn(repeater_ctrl_t* rc, uint64_t now){
-  atomic_store_explicit(&rc->last_tx_ms_nxdn,(uint32_t)now, memory_order_release);
+  atomic_store_explicit(&rc->last_tx_ms_nxdn,(uint64_t)now, memory_order_release);
 }
 
-static inline int lockout_passed(uint32_t last32, uint32_t now32, uint32_t window_ms) {
+static inline int lockout_passed(uint64_t last64, uint64_t now64, uint64_t window_ms) {
   // Unsigned wrap-safe subtraction
-  uint32_t diff = now32 - last32;
-  return (last32 == 0U) || (diff > window_ms);
+  uint64_t diff = now64 - last64;
+  return (last64 == 0U) || (diff > window_ms);
 }
 
 int rc_repeat_allowed_dmr(const repeater_ctrl_t* rc, uint64_t now) {
   uint32_t last = atomic_load_explicit(&rc->last_tx_ms_dmr, memory_order_acquire);
-  return lockout_passed(last, (uint32_t)now, rc->tx_lockout_ms);
+  return lockout_passed(last, (uint64_t)now, rc->tx_lockout_ms);
 }
 int rc_repeat_allowed_ysf(const repeater_ctrl_t* rc, uint64_t now) {
   uint32_t last = atomic_load_explicit(&rc->last_tx_ms_ysf, memory_order_acquire);
-  return lockout_passed(last, (uint32_t)now, rc->tx_lockout_ms);
+  return lockout_passed(last, (uint64_t)now, rc->tx_lockout_ms);
 }
 int rc_repeat_allowed_nxdn(const repeater_ctrl_t* rc, uint64_t now) {
   uint32_t last = atomic_load_explicit(&rc->last_tx_ms_nxdn, memory_order_acquire);
-  return lockout_passed(last, (uint32_t)now, rc->tx_lockout_ms);
+  return lockout_passed(last, (uint64_t)now, rc->tx_lockout_ms);
 }
 
 void rc_tick(repeater_ctrl_t* rc, mode_handler_t* dmr, mode_handler_t* ysf, mode_handler_t* nxdn) {

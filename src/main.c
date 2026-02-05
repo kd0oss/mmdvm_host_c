@@ -10,6 +10,7 @@
 #include "set_config.h"
 #include "log.h"
 #include "time_util.h"
+#include "mode_dmr.h"   // <-- add this include
 
 // Mode constructors
 mode_handler_t* dmr_mode_new(void* ctx);
@@ -47,7 +48,7 @@ int main(int argc, char** argv) {
   if (!g_modem) { fprintf(stderr, "Failed to open modem on %s\n", cfg->serial_dev ? cfg->serial_dev : "(null)"); config_free(cfg); return 1; }
 
   g_rc.mode = cfg->duplex;
-  g_rc.tx_lockout_ms = 250;
+  g_rc.tx_lockout_ms = 50;
 
   modem_get_version(g_modem);
   apply_modem_config(g_modem, cfg);
@@ -69,7 +70,6 @@ int main(int argc, char** argv) {
   log_set_rx_enabled(cfg->log_frames_rx);
   log_set_tx_enabled(cfg->log_frames_tx);
 
-  g_rc.tx_lockout_ms = 150;
   rc_set_dmr_tx_on(&g_rc, 0);
 
   pthread_t rx_thr, tx_thr, st_thr;

@@ -20,6 +20,7 @@ add_library(core_c
   src/log.c
   src/time_util.c
   src/status_thread.c
+  src/dmr_call_state.c   # NEW
 )
 
 add_library(adapters_cpp
