@@ -78,7 +78,8 @@ int modem_read_frame(modem_t* m, modem_frame_t* out) {
     ssize_t r = read(m->fd, &sof, 1);
     if (r == 1 && sof == MMDVM_SOF) break;
     if (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK) return -1;
-    struct timespec req = {.tv_sec=0, .tv_nsec=1*1000*1000}; nanosleep(&req, NULL);
+    struct timespec req = {.tv_sec=0, .tv_nsec=1*1000*1000};
+    nanosleep(&req, NULL);
   }
   uint8_t len = 0, type = 0;
   if (read_n(m->fd, &len, 1, 10) != 1) return -1;
@@ -167,7 +168,9 @@ int modem_set_mode(modem_t* m, uint8_t state)
 int modem_dmr_start(modem_t* m, uint8_t start)
 {
    if (!m) return -1;
-   uint8_t p[1] = { start ? 0x01 : 0x00 };
+   struct timespec req = {.tv_sec=0, .tv_nsec=1*1000*5000};
+  nanosleep(&req, NULL);
+  uint8_t p[1] = { start ? 0x01 : 0x00 };
    log_info("[TX] DMR_START tx_on=%u", p[0]);
    return modem_write_envelope(m, MMDVM_DMR_START, p, 1);
 }

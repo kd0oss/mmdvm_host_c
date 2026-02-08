@@ -48,7 +48,7 @@ int main(int argc, char** argv) {
   if (!g_modem) { fprintf(stderr, "Failed to open modem on %s\n", cfg->serial_dev ? cfg->serial_dev : "(null)"); config_free(cfg); return 1; }
 
   g_rc.mode = cfg->duplex;
-  g_rc.tx_lockout_ms = 50;
+  g_rc.tx_lockout_ms = 10;
 
   modem_get_version(g_modem);
   apply_modem_config(g_modem, cfg);

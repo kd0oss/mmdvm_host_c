@@ -25,9 +25,7 @@ add_library(core_c
 
 add_library(adapters_cpp
   src/config_loader.cpp
-  src/dmr_csbk_port.cpp
-  src/dmr_lc_port.cpp
-  src/dmr_slotType_port.cpp
+  src/dmr_ports.cpp
   third_party/mmdvmhost/BPTC19696.cpp
   third_party/mmdvmhost/CRC.cpp
   third_party/mmdvmhost/RS129.cpp

@@ -13,7 +13,7 @@ typedef enum {
 typedef struct {
   radio_mode_t mode;
   uint8_t type;         // envelope TYPE (e.g., 0x18, 0x1A, 0x20, 0x40)
-  const uint8_t* data;
+  uint8_t* data;
   size_t len;
   uint64_t ts_ms;
 } modem_frame_t;

@@ -79,9 +79,9 @@ void log_frame_rx(uint8_t type, const uint8_t* payload, size_t len) {
 
 void log_frame_tx(uint8_t type, const uint8_t* payload, size_t len) {
 #ifdef __STDC_NO_ATOMICS__
-  if (!g_tx_enabled) return;
+//  if (!g_tx_enabled) return;
 #else
-  if (atomic_load_explicit(&g_tx_enabled, memory_order_acquire) == 0U) return;
+//  if (atomic_load_explicit(&g_tx_enabled, memory_order_acquire) == 0U) return;
 #endif
   uint64_t ts = now_ms();
   printf("[TX] ts=%" PRIu64 " type=0x%02X (%s) len=%zu payload=", ts, type, type_name(type), len);

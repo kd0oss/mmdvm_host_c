@@ -29,7 +29,7 @@ int apply_modem_config(modem_t* m, const config_t* cfg) {
   p[5] = 128; // txDCOffset
   p[6] = 128; // rxDCOffset
 
-  p[7]  = clamp8u(50);
+  p[7]  = clamp8u(50 * 2.55F + 0.5F);
   p[8]  = clamp8u(70);
   p[9]  = clamp8u(70);
   p[10] = clamp8u(70 * 2.55F + 0.5F);

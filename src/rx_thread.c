@@ -5,9 +5,8 @@
 #include "dmr_meta.h"
 #include "mmdvm_proto.h"
 #include "dmr_defines.h"
-#include "dmr_csbk_port.h"
-#include "dmr_lc_port.h"      // LC decode for src/dst/group
-#include "dmr_call_state.h"   // NEW: call state
+#include "dmr_ports.h"
+#include "dmr_call_state.h"
 #include "log.h"
 
 #include <stdio.h>
@@ -21,31 +20,28 @@ extern mode_handler_t* g_ysf;
 extern mode_handler_t* g_nxdn;
 extern modem_t* g_modem;
 
-static dmr_call_state_t g_call;
+// Separate call states for each slot
+static dmr_call_state_t g_call_slot1;
+static dmr_call_state_t g_call_slot2;
+
+// External functions from mode_dmr.c
+extern void dmr_slot_terminated(mode_handler_t* self, uint8_t slot, uint64_t now_ms);
+extern void dmr_slot_started(mode_handler_t* self, uint8_t slot);
+extern int dmr_any_active(mode_handler_t* self);
 
 static inline uint8_t dmr_slot_from_type(uint8_t envelope_type) {
   return (envelope_type == MMDVM_DMR_DATA2 || envelope_type == MMDVM_DMR_LOST2) ? 2 : 1;
 }
 
-// LC header detection not gated by VOICE/DATA bits; pass exactly 33 bytes starting at meta1
-static int is_dmr_voice_or_data(const uint8_t* header33, size_t len) {
-  if (!header33 || len < 33) return 0;
-  const uint8_t ct = header33[0];
-  const uint8_t CONTROL_VOICE = 0x20;
-  const uint8_t CONTROL_DATA  = 0x40;
-  const uint8_t CONTROL_IDLE  = 0x80;
-  return ((ct & (CONTROL_VOICE | CONTROL_DATA)) && !(ct & CONTROL_IDLE)) ? 1 : 0;
-}
-
-static int build_shortlc_from_header_naive(const uint8_t* header33, size_t len, uint8_t out9[9]) {
-  if (!header33 || len < 33 || !out9) return 0;
-  for (int i = 0; i < 9; ++i) out9[i] = header33[2 + i];
-  return 1;
+// Get the call state for a specific slot
+static inline dmr_call_state_t* get_slot_state(uint8_t slot) {
+  return (slot == 2) ? &g_call_slot2 : &g_call_slot1;
 }
 
 void* rx_thread_fn(void* arg) {
   (void)arg;
-  dmr_call_reset(&g_call);
+  dmr_call_reset(&g_call_slot1);
+  dmr_call_reset(&g_call_slot2);
 
   modem_frame_t f;
   for (;;) {
@@ -54,105 +50,194 @@ void* rx_thread_fn(void* arg) {
       switch (f.mode) {
         case MODE_DMR:
           if (rc_repeat_allowed_dmr(&g_rc, now64)) {
-       //     log_info("========================== Meta: %02X", f.data[0]);
             g_dmr->last_type = f.type;
 
             if (f.len >= 34) {
               const uint8_t meta0 = f.data[0];
-              const uint8_t dt    = (uint8_t)(meta0 & 0x0F);          // lower nibble is data type
-              const int has_data_sync = (meta0 & DMR_SYNC_DATA) != 0;  // upper nibble sync flag(s)
-              const int is_idle       = (meta0 & DMR_IDLE_RX) != 0;
+              
+              // Extract sync flags from upper nibble
+              const int has_data_sync  = (meta0 & DMR_SYNC_DATA) != 0;   // 0x40
+              const int has_voice_sync = (meta0 & DMR_SYNC_AUDIO) != 0;  // 0x20
+              const int is_idle        = (meta0 & DMR_IDLE_RX) != 0;     // 0x80
 
-              // RF payload begins at meta1 now
+              // RF payload begins at meta1
               const uint8_t* payload     = f.data + 1;
               const size_t   payload_len = (f.len - 1);
               const uint8_t  slot        = dmr_slot_from_type(f.type);
 
-              uint8_t  cc_effective = g_call.active ? g_call.color_code : 0xFF;
+              // Get the call state for this slot
+              dmr_call_state_t* call = get_slot_state(slot);
+              uint8_t cc_effective = call->active ? call->color_code : 0xFF;
 
-              // CSBK handling: decode CBF/dstId from coded CSBK in payload
-              if (dt == DT_CSBK && has_data_sync && is_idle) {
-                uint32_t srcIdStrict = 0;
-                int strict_ok = csbk_is_bsdwnact_strict(payload, payload_len, &srcIdStrict);
+              // ===================================================================
+              // CONTROL FRAMES (DATA_SYNC) - DT field is valid
+              // ===================================================================
+              if (has_data_sync) {
+                // Only for control frames, extract DT from lower nibble
+                const uint8_t dt = (uint8_t)(meta0 & 0x0F);
+                
+                // CSBK handling
+                if (dt == DT_CSBK && is_idle) {
+                  uint32_t srcIdStrict = 0;
+                  int strict_ok = csbk_is_bsdwnact_strict(payload, payload_len, &srcIdStrict);
 
-                dmr_csbk_info_t csbk = {0};
-                if (csbk_parse_info(payload, payload_len, &csbk) && csbk.valid) {
-                  uint8_t cc_from_csbk = (uint8_t)(csbk.cbf & 0x0F);
-                  if (cc_from_csbk) {
-                    cc_effective = cc_from_csbk;
-                    dmr_call_update_cc(&g_call, cc_effective);
+                  dmr_csbk_info_t csbk = {0};
+                  if (csbk_parse_info(payload, payload_len, &csbk) && csbk.valid) {
+                    uint8_t cc_from_csbk = (uint8_t)(csbk.cbf & 0x0F);
+                    if (cc_from_csbk) {
+                      cc_effective = cc_from_csbk;
+                      dmr_call_update_cc(call, cc_effective);
+                    }
+
+                    // If not active, start a call
+                    if (!call->active) {
+                      dmr_call_start(call, cc_effective, slot, csbk.srcId, csbk.dstId, 1);
+                      
+                      // Notify mode_dmr that this slot has started
+                      dmr_slot_started(g_dmr, slot);
+                      
+                      // Start TX if not already on
+                      if (!rc_is_dmr_tx_on(&g_rc)) {
+                        if (modem_set_mode(g_modem, MODE_DMR) != 0) log_info("SET_MODE DMR failed");
+                        modem_get_status(g_modem);
+                        modem_dmr_start(g_modem, 1);
+                        rc_set_dmr_tx_on(&g_rc, 1U);
+                      }
+                      rc_bump_dmr_tx_watchdog(&g_rc, (uint32_t)now64, g_dmr ? g_dmr->hang_ms : 3000);
+                    }
                   }
 
-                  // If not active, start a call with CC and IDs from CSBK when present
-                  if (!g_call.active) {
-                    dmr_call_start(&g_call, cc_effective, slot, csbk.srcId, csbk.dstId, 1 /* assume group for CSBK */);
-                    if (modem_set_mode(g_modem, MODE_DMR) != 0) log_info("SET_MODE DMR failed");
-                    modem_get_status(g_modem);
-                    modem_dmr_start(g_modem, 1);
-                    rc_set_dmr_tx_on(&g_rc, 1U);
-                    rc_bump_dmr_tx_watchdog(&g_rc, (uint32_t)now64, g_dmr ? g_dmr->hang_ms : 3000);
+                  log_info("CSBK strict: %s, srcId=%u, slot=%u", 
+                           strict_ok ? "PASS" : "FAIL", strict_ok ? srcIdStrict : 0U, slot);
+                }
+
+                // Voice LC Header
+                if (dt == DT_VOICE_LC_HEADER && payload_len >= 33)
+                {
+                  uint32_t src_id = 0, dst_id = 0; int is_group = 1;
+                  if (dmr_lc_parse_ids_dt(payload, 33, dt, &src_id, &dst_id, &is_group))
+                  {
+                    if (!call->active)
+                    {
+                      dmr_call_start(call, cc_effective, slot, src_id, dst_id, (uint8_t)is_group);
+                      
+                      // Notify mode_dmr that this slot has started
+                      dmr_slot_started(g_dmr, slot);
+                      
+                      // Start TX if not already on
+                      if (!rc_is_dmr_tx_on(&g_rc)) {
+                        if (modem_set_mode(g_modem, MODE_DMR) != 0) log_info("SET_MODE DMR failed");
+                        modem_get_status(g_modem);
+                        modem_dmr_start(g_modem, 1);
+                        rc_set_dmr_tx_on(&g_rc, 1U);
+                      }
+                      rc_bump_dmr_tx_watchdog(&g_rc, (uint32_t)now64, g_dmr ? g_dmr->hang_ms : 3000);
+                    } else
+                    {
+                      call->src_id = src_id;
+                      call->dst_id = dst_id;
+                      call->is_group = (uint8_t)is_group;
+                    }
+
+                    log_info("[RX] DMR LC Header: src=%u dst=%u %s | slot=%u cc=%s", 
+                             src_id, dst_id, is_group ? "(group)" : "(private)",
+                             slot, (cc_effective == 0xFF ? "?" : ""));
+                    if (cc_effective != 0xFF)
+                      log_info("           cc=%u", cc_effective);
+                  } else
+                  {
+                    log_info("[RX] DMR LC: decode FAILED | slot=%u", slot);
+                  }
+                  
+                  // Pass to mode handler (will be filtered, not echoed)
+                  mode_on_rx(g_dmr, f.data, f.len, f.ts_ms);
+                  rc_on_rx_dmr(&g_rc);
+                }
+
+                // Data Header
+                if (dt == DT_DATA_HEADER && payload_len >= 33)
+                {
+                  uint32_t src_id = 0, dst_id = 0; int is_group = 1;
+                  if (dmr_lc_parse_ids_dt(payload, 33, dt, &src_id, &dst_id, &is_group))
+                  {
+                    if (!call->active)
+                    {
+                      dmr_call_start(call, cc_effective, slot, src_id, dst_id, (uint8_t)is_group);
+                      
+                      // Notify mode_dmr that this slot has started
+                      dmr_slot_started(g_dmr, slot);
+                      
+                      // Start TX if not already on
+                      if (!rc_is_dmr_tx_on(&g_rc)) {
+                        if (modem_set_mode(g_modem, MODE_DMR) != 0) log_info("SET_MODE DMR failed");
+                        modem_get_status(g_modem);
+                        modem_dmr_start(g_modem, 1);
+                        rc_set_dmr_tx_on(&g_rc, 1U);
+                      }
+                      rc_bump_dmr_tx_watchdog(&g_rc, (uint32_t)now64, g_dmr ? g_dmr->hang_ms : 3000);
+                    } else
+                    {
+                      call->src_id = src_id;
+                      call->dst_id = dst_id;
+                      call->is_group = (uint8_t)is_group;
+                    }
+
+                    log_info("[RX] DMR Data Header: src=%u dst=%u %s | slot=%u", 
+                             src_id, dst_id, is_group ? "(group)" : "(private)", slot);
+                  }
+                  
+                  // Pass to mode handler
+                  mode_on_rx(g_dmr, f.data, f.len, f.ts_ms);
+                  rc_on_rx_dmr(&g_rc);
+                }
+
+                // Terminator with LC
+                if (dt == DT_TERMINATOR_WITH_LC)
+                {
+                  if (call->active)
+                  {
+                    log_info("[DMR] Terminator: slot=%u dst=%u", slot, call->dst_id);
+                    
+                    // Stop the call and enter tail mode for this slot
+                    dmr_call_stop(call);
+                    dmr_slot_terminated(g_dmr, slot, now64);
+                    
+                    // Don't stop TX here - tail mode will keep it running
+                    // TX will be stopped by the tick function when tails expire
                   }
                 }
-
-                log_info("CSBK strict: %s, srcId=%u", strict_ok ? "PASS" : "FAIL", strict_ok ? srcIdStrict : 0U);
               }
-
-              // LC header decode: pass EXACTLY 33 bytes at meta1
-              if ((dt == DT_VOICE_LC_HEADER || dt == DT_DATA_HEADER) && payload_len >= 33) {
-                uint32_t src_id = 0, dst_id = 0; int is_group = 1;
-                if (dmr_lc_parse_ids_dt(payload, 33, dt, &src_id, &dst_id, &is_group)) {
-                  // Start call if not active; otherwise update IDs
-                  if (!g_call.active) {
-                    dmr_call_start(&g_call, cc_effective, slot, src_id, dst_id, (uint8_t)is_group);
-                    if (modem_set_mode(g_modem, MODE_DMR) != 0) log_info("SET_MODE DMR failed");
-                    modem_get_status(g_modem);
-                    modem_dmr_start(g_modem, 1);
-                    rc_set_dmr_tx_on(&g_rc, 1U);
-                    rc_bump_dmr_tx_watchdog(&g_rc, (uint32_t)now64, g_dmr ? g_dmr->hang_ms : 3000);
-                  } else {
-                    g_call.src_id = src_id;
-                    g_call.dst_id = dst_id;
-                    g_call.is_group = (uint8_t)is_group;
-                  }
-
-                  log_info("[RX] DMR LC: src=%u dst=%u %s | slot=%u cc=%s", src_id, dst_id, is_group ? "(group)" : "(private)",
-                           slot, (cc_effective == 0xFF ? "?" : ""));
-                  if (cc_effective != 0xFF)
-                    log_info("           cc=%u", cc_effective);
-
-                  // ABORT then ShortLC (placeholder mapping)
-                  //modem_dmr_abort(g_modem, 1);
-                  //uint8_t slc9[9];
-                  //if (build_shortlc_from_header_naive(payload, 33, slc9)) {
-                    //modem_dmr_shortlc(g_modem, slc9);
-                  //}
-                } else {
-                  log_info("[RX] DMR LC: decode FAILED | slot=%u", slot);
+              
+              // ===================================================================
+              // VOICE FRAMES WITH SYNC (meta0 = 0x20)
+              // ===================================================================
+              else if (has_voice_sync && !is_idle && !has_data_sync)
+              {
+                // Voice payload burst with sync pattern
+                if (call->active) {
+                  mode_on_rx(g_dmr, f.data, f.len, f.ts_ms);
+                  rc_on_rx_dmr(&g_rc);
+                  log_info("[RX] DMR VOICE+SYNC slot=%u dst_id=%u", slot, call->dst_id);
                 }
               }
-
-              // Stop TX cleanly on Terminator with LC (spec end-of-call)
-              if (dt == DT_TERMINATOR_WITH_LC && (meta0 & 0xf0) == 0x40) {
-                if (g_call.active) {
-                  log_info("[DMR] Terminator with LC: stopping TX (cc=%s slot=%u dst=%u)",
-                           (g_call.color_code == 0xFF ? "?" : ""), g_call.slot, g_call.dst_id);
+              
+              // ===================================================================
+              // VOICE FRAMES WITHOUT SYNC (meta0 = 0x01-0x05, etc.)
+              // ===================================================================
+              else if (!has_data_sync && !has_voice_sync && !is_idle)
+              {
+                // Extract what would be the DT if this were a control frame
+                const uint8_t dt_value = (uint8_t)(meta0 & 0x0F);
+                
+                // Voice bursts - echo if we have an active call on this slot
+                if (call->active) {
+                  mode_on_rx(g_dmr, f.data, f.len, f.ts_ms);
+                  rc_on_rx_dmr(&g_rc);
+                  log_info("[RX] DMR VOICE burst=0x%02X slot=%u dst_id=%u", 
+                           dt_value, slot, call->dst_id);
                 }
-                modem_dmr_start(g_modem, 0);
-                rc_set_dmr_tx_on(&g_rc, 0U);
-                dmr_call_stop(&g_call);
-              }
-
-              // Regular bursts: log dt/slot and any known IDs
-              if (dt != DT_VOICE_LC_HEADER && dt != DT_DATA_HEADER /*&& dt != DT_TERMINATOR_WITH_LC*/) {
-                if (g_call.dst_id)
-                  log_info("[RX] DMR dt=0x%02X slot=%u dst_id=%u", dt, slot, g_call.dst_id);
-                else
-                  log_info("[RX] DMR dt=0x%02X slot=%u", dt, slot);
               }
             }
-
-            mode_on_rx(g_dmr,  f.data, f.len, f.ts_ms);
-            rc_on_rx_dmr(&g_rc);
           }
           break;
 

@@ -10,6 +10,7 @@
 #define DT_RATE_12_DATA        0x07
 #define DT_RATE_34_DATA        0x08
 #define DT_IDLE                0x09
+#define DT_RATE_1_DATA         0x0A
 
 // Sync/meta flags in modem payload
 #define DMR_IDLE_RX            0x80
